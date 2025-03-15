@@ -28,6 +28,34 @@ AT4DX replaces static method calls in traditional fflib with dependency injectio
 </CustomMetadata>
 ```
 
+**Explanation**
+
+This is an `ApplicationFactory_DomainBinding__mdt` custom metadata record named "AccountSObjectBinding" that creates a binding between the Account SObject and its domain implementation.
+
+Breaking it down:
+
+1. `label` defines the display name of this metadata record as "AccountSObjectBinding"
+
+2. `protected` set to "false" means this metadata record can be modified by administrators
+
+3. The `BindingSObject__c` field specifies which SObject this binding applies to - in this case, "Account"
+
+4. The `To__c` field specifies the implementation class that should be instantiated when code requests a domain for Account objects - "Accounts.Constructor"
+
+In AT4DX, the notation "Accounts.Constructor" refers to a static inner class named "Constructor" within the "Accounts" domain class that implements the fflib_SObjectDomain.IConstructable interface.
+
+This metadata-driven approach is what allows AT4DX to use dependency injection instead of hardcoded class references. When code calls `Application.Domain.newInstance(accountRecords)`, the framework:
+
+1. Looks up the SObject type of the records (Account)
+2. Searches for a matching ApplicationFactory_DomainBinding__mdt record
+3. Finds this binding pointing to "Accounts.Constructor"
+4. Instantiates that class and passes the records to it
+5. Returns the resulting domain object
+
+The key advantage is that different packages can provide their own bindings without modifying existing code. For example, a finance package could override the Account domain implementation with a specialized version by creating a new binding with higher priority.
+
+This approach decouples the consumer of a domain from its implementation, allowing for modular, extensible architecture across package boundaries.
+
 ### For Developers
 Instead of using the traditional fflib static factory approach, use Application class with dependency injection:
 
@@ -142,6 +170,42 @@ public class DefaultAccountSloganBasedOnNameAction
 </CustomMetadata>
 ```
 
+This is a `DomainProcessBinding__mdt` record named "FishCompanySlogans10_10Criteria" that defines criteria that should be executed during Account trigger processing.
+
+Breaking it down:
+
+1. `label` - "Fish Company Slogans Criteria 1" is the human-readable name for this process binding
+
+2. `ClassToInject__c` - "AccountNameContainsFishCriteria" identifies the Apex class that implements the criteria logic. This class would implement the `IDomainProcessCriteria` interface and contains the actual filter logic.
+
+3. `ProcessContext__c` - "TriggerExecution" specifies that this binding applies during trigger execution (as opposed to being called from domain methods directly).
+
+4. `RelatedDomainBindingSObject__c` - "Account" indicates this binding applies to the Account SObject.
+
+5. `TriggerOperation__c` - "Before_Insert" specifies that this binding should execute during the before insert trigger phase of Account records.
+
+6. `Type__c` - "Criteria" identifies this as a criteria binding rather than an action binding. In AT4DX, criteria classes filter records to determine which ones should be processed by subsequent actions.
+
+Here's what happens at runtime:
+
+1. When Account records are inserted, the Account trigger fires.
+2. The Domain Process Coordinator, which is configured in the trigger, scans for all applicable DomainProcessBinding__mdt records.
+3. It finds this criteria binding for "Before_Insert" operations.
+4. It instantiates the "AccountNameContainsFishCriteria" class.
+5. The criteria class examines each Account record to see if its name contains "fish".
+6. Only records meeting this criteria are passed on to the next step in the process.
+
+In the AT4DX sample code, there's likely a corresponding action binding with a similar name (like FishCompanySlogans10_20Action) that would process the filtered records by setting a slogan field.
+
+This approach is powerful because:
+
+1. The marketing package can inject behavior into the Account object without modifying its base domain code.
+2. The filter logic is encapsulated in a dedicated class rather than mixed with processing logic.
+3. The whole process is configured via metadata rather than code, allowing for changes without deployment.
+4. Multiple packages can contribute different criteria and actions, all executed in the proper order based on their OrderOfExecution__c values.
+
+This exemplifies AT4DX's ability to extend functionality across package boundaries in a modular, loosely coupled way.
+
 ### For DevOps Engineers
 Create package dependencies so that extension packages are installed after the base package. Use the dependency injection patterns to configure order of execution across packages:
 
@@ -179,6 +243,58 @@ public class AccountModsEventPublisher {
     }
 }
 ```
+
+The `AccountModsEventPublisher` class provides a standardized way to publish platform events when Account records are modified.  This class acts as a publisher in the publish-subscribe pattern for cross-package communication in AT4DX. Here's how it works:
+
+1. It exposes a static method `publishAccountModification` that takes a Set of Account Ids as input.
+
+2. Inside the method, it creates a new platform event of type `AT4DXMessage__e`, which is a standard event type provided by AT4DX.
+
+3. It populates three standard fields on the platform event:
+   - `Category__c`: Set to 'Account' to categorize this event as Account-related
+   - `EventName__c`: Set to 'ACCOUNT_RECORD_MODIFICATION' to specifically identify the type of event
+   - `Payload__c`: Contains the serialized set of Account Ids that were modified
+
+4. Finally, it publishes the event to the platform event bus using the standard Salesforce `EventBus.publish()` method.
+
+This approach has several benefits:
+
+1. **Loose Coupling**: The publisher doesn't need to know who will consume these events. Any package that wants to react to Account modifications can subscribe to these events without the publisher being aware.
+
+2. **Standardized Structure**: By using the AT4DX standard event structure with Category, EventName, and Payload fields, it follows a consistent pattern that the AT4DX Platform Event Distributor can route appropriately.
+
+3. **Cross-Package Communication**: This enables different packages to communicate without direct dependencies. For example, the Sales package can subscribe to these events even though it doesn't depend on the package that publishes them.
+
+4. **Asynchronous Processing**: Using platform events enables asynchronous processing of Account changes, which can help with governor limits and processing isolation.
+
+In practice, this class would be called from within domain logic or service methods when Account records are modified, triggering the event that other packages can then respond to.
+
+
+#### **AT4DXMessage__e**: A Generic Platform Event as a Event Bus
+
+It's designed as a single, flexible platform event that can support many different types of events across your application through its structured fields.
+
+It serves as a generic event bus with three key fields:
+
+1. **Category__c**: Identifies the broad category of the event (like 'Account', 'Opportunity', 'System', etc.). This allows subscribers to filter for events related to specific areas of functionality.
+
+2. **EventName__c**: Provides a more specific identifier for the event type within a category (like 'ACCOUNT_RECORD_MODIFICATION', 'OPPORTUNITY_STAGE_CHANGE', etc.). This gives fine-grained control over what specific events to subscribe to.
+
+3. **Payload__c**: Contains the event data serialized as JSON. This flexible approach means any structured data can be passed through the same event type - from simple IDs to complex data structures.
+
+This design brings several benefits:
+
+- **Consolidated Event Management**: Instead of creating dozens of custom platform event types for different scenarios, you use one consistent type with standardized fields.
+
+- **Dynamic Subscription**: AT4DX's PlatformEventDistributor can route events to the appropriate consumers based on rules defined in metadata (PlatformEvents_Subscription__mdt records).
+
+- **Simplified Governance**: Managing a single platform event type is easier than maintaining many different event definitions.
+
+- **Matching Flexibility**: The PlatformEventDistributor supports different matching rules like matching on category only, event name only, or both together.
+
+The sample code also includes AT4DXImmediateMessage__e, which works the same way but is processed in the current transaction context rather than asynchronously.
+
+This architecture means new events can be added without creating new platform event definitions - you simply use new Category/EventName combinations and document them as part of your application's event catalog.
 
 **Create Event Consumer**:
 ```java
@@ -222,6 +338,43 @@ public class Sales_PlatformEventsConsumer extends PlatformEventAbstractConsumer 
 </CustomMetadata>
 ```
 
+This CustomMetadata record is a subscription configuration for AT4DX's Platform Event Distribution framework. This is a `PlatformEvents_Subscription__mdt` record named "Sales_PlatformEventsConsumer" that registers a consumer to process specific platform events. 
+
+Breaking it down:
+
+1. `label` - "Sales_PlatformEventsConsumer" is the human-readable name for this subscription.
+
+2. `Consumer__c` - "Sales_PlatformEventsConsumer" is the name of the Apex class that will handle the events. This class must implement the `IEventsConsumer` interface or extend `PlatformEventAbstractConsumer`.
+
+3. `EventBus__c` - "AT4DXMessage__e" identifies which platform event object this subscription applies to. This corresponds to the generic event bus provided by AT4DX.
+
+4. `EventCategory__c` - "Account" specifies that this consumer is only interested in events with the Category__c field set to "Account". 
+
+5. `Event__c` - "ACCOUNT_RECORD_MODIFICATION" further restricts this subscription to only handle events with this specific event name.
+
+6. `MatcherRule__c` - "MatchEventBusAndCategoryAndEventName" tells the PlatformEventDistributor to use all three criteria (event bus, category, and event name) when determining if an event should be routed to this consumer.
+
+Here's what happens at runtime:
+
+1. When an AT4DXMessage__e platform event is published (e.g., via AccountModsEventPublisher), it triggers the AT4DXMessages trigger.
+
+2. The trigger calls PlatformEventDistributor.triggerHandler() which processes all incoming events.
+
+3. The distributor looks up all registered PlatformEvents_Subscription__mdt records.
+
+4. It evaluates each event against each subscription using the specified matcher rule.
+
+5. For this subscription, it will check if:
+   - The event is an AT4DXMessage__e
+   - Category__c equals "Account"
+   - EventName__c equals "ACCOUNT_RECORD_MODIFICATION"
+
+6. If all conditions match, it instantiates the Sales_PlatformEventsConsumer class and passes the matching events to it for processing.
+
+This approach enables the Sales package to listen for Account modification events without direct dependencies on the publishing package. The subscription is entirely configured via metadata, making it possible to add or modify event handling without code changes.
+
+This is a powerful example of how AT4DX enables modular, loosely coupled architecture through metadata-driven configuration.
+
 ### For DevOps Engineers
 Deploy platform event definitions as part of the core package. Ensure triggers for the AT4DXMessage__e and AT4DXImmediateMessage__e events are in place for the distribution framework to function:
 
@@ -255,6 +408,39 @@ AT4DX allows selectors to dynamically include fields from different packages:
     <label>Selector Inclusion Account Marketing</label>
 </FieldSet>
 ```
+
+This XML file defines a Salesforce FieldSet that is a key part of AT4DX's Selector Field Injection mechanism. This FieldSet is named `SelectorInclusion_AccountFieldsMarketing` and it's designed to be used with the Account object. It's created in the marketing package to extend the account selector with marketing-specific fields.
+
+Breaking it down:
+
+1. `fullName` - "SelectorInclusion_AccountFieldsMarketing" is the API name of the FieldSet.
+
+2. `displayedFields` - This section lists all fields that should be included in this FieldSet:
+   - `field` - "Slogan__c" is a custom field from the marketing package that should be included in queries
+   - `isFieldManaged` - "false" indicates this field isn't managed by a package
+   - `isRequired` - "false" means this field isn't required to be populated
+
+3. `label` - "Selector Inclusion Account Marketing" is the human-readable name for this FieldSet.
+
+Why this is important:
+
+In traditional fflib, to add fields to a selector, you would need to modify the selector class directly by adding the new fields to the getSObjectFieldList() method. This creates tight coupling between packages and makes it hard to modularly extend functionality.
+
+AT4DX solves this problem with FieldSets and the following mechanism:
+
+1. The marketing package defines this FieldSet containing marketing-specific fields for Account.
+
+2. It then creates a `SelectorConfig_FieldSetInclusion__mdt` record that registers this FieldSet with the AT4DX framework. See "Add metadata to register the fieldset for inclusion" below. 
+
+3. The core AccountsSelector includes code to dynamically add all registered FieldSets. See "The base selector automatically includes these fields".below 
+
+This powerful pattern allows:
+- Different packages to add their own fields to existing selectors
+- No modification of base selector code
+- Clean separation of concerns
+- Modular deployment where packages can be installed or uninstalled without breaking selectors
+
+This is one of the key ways AT4DX enables true modular development across package boundaries while maintaining the familiar Selector pattern from fflib.
 
 **Add metadata to register the fieldset for inclusion**:
 ```xml
@@ -480,6 +666,116 @@ Reference Implementation Common
 Reference Implementation Marketing, Sales, Service (parallel dependencies)
 ```
 
+## How Multiple Service Implementations Are Handled
+
+When you have multiple classes implementing the same `IAccountsService` interface across different packages in AT4DX, how these implementations are used depends on how they're registered via dependency injection. Here are the AT4DX options for handling multiple implementations of the same interface:
+
+### 1. Default Binding with Priority
+
+Each implementation is registered with a Custom Metadata record:
+
+```xml
+<!-- From Sales Package -->
+<CustomMetadata>
+    <label>IAccountsService_Sales</label>
+    <values>
+        <field>BindingInterface__c</field>
+        <value>IAccountsService</value>
+    </values>
+    <values>
+        <field>To__c</field>
+        <value>Sales_AccountsService</value>
+    </values>
+    <values>
+        <field>Priority__c</field>
+        <value>10</value>
+    </values>
+</CustomMetadata>
+
+<!-- From Marketing Package -->
+<CustomMetadata>
+    <label>IAccountsService_Marketing</label>
+    <values>
+        <field>BindingInterface__c</field>
+        <value>IAccountsService</value>
+    </values>
+    <values>
+        <field>To__c</field>
+        <value>Marketing_AccountsService</value>
+    </values>
+    <values>
+        <field>Priority__c</field>
+        <value>20</value>
+    </values>
+</CustomMetadata>
+```
+
+When code calls:
+```java
+IAccountsService service = (IAccountsService)Application.Service.newInstance(IAccountsService.class);
+```
+
+Only ONE implementation will be returned - the one with the highest priority value. In this example, `Marketing_AccountsService` would be used because its priority (20) is higher than `Sales_AccountsService` (10).
+
+### 2. Named Bindings
+
+Instead of relying on priority, you can use named bindings:
+
+```java
+// Get specifically the Sales implementation
+IAccountsService salesService = (IAccountsService)Application.Service.newInstance(IAccountsService.class, 'Sales');
+
+// Get specifically the Marketing implementation
+IAccountsService marketingService = (IAccountsService)Application.Service.newInstance(IAccountsService.class, 'Marketing');
+```
+
+This requires appropriate binding configuration with named parameters.
+
+### 3. Service Aggregation Pattern
+
+You can create a composite service that delegates to all registered implementations:
+
+```java
+public class CompositeAccountsService implements IAccountsService {
+    public void processAccounts(Set<Id> accountIds) {
+        // Get all implementations
+        List<IAccountsService> allServices = di_Injector.Org.getAll(IAccountsService.class);
+        
+        // Call each implementation
+        for(IAccountsService service : allServices) {
+            service.processAccounts(accountIds);
+        }
+    }
+}
+```
+
+This composite service would then be registered as the primary binding.
+
+### 4. Event-Based Communication
+
+Instead of directly calling services, different implementations can subscribe to events:
+
+```java
+// Publisher code
+EventBus.publish(new AT4DXMessage__e(
+    Category__c = 'Account',
+    EventName__c = 'PROCESS_ACCOUNTS',
+    Payload__c = JSON.serialize(accountIds)
+));
+```
+
+Each service then has its own consumer class that subscribes to this event. This is the most loosely coupled approach and is often preferred in AT4DX for cross-package communication.
+
+## Best Practices
+
+In AT4DX, the preferred approach for handling multiple implementations across packages is usually:
+
+1. For independent behavior - Use the event-based approach where each package responds to events independently
+2. For explicit composition - Use a higher-level service that explicitly orchestrates calls to specific named implementations
+3. For override/priority behavior - Use priority-based bindings where one implementation should take precedence
+
+This modular approach is one of the key advantages of AT4DX's dependency injection framework over traditional fflib, where managing multiple implementations would require more custom code.
+
 ## 8. Advanced Testing Support
 
 ### For Architects
@@ -523,6 +819,47 @@ private class AccountsServiceTest {
     }
 }
 ```
+
+This `AccountsServiceTest` is demonstrating unit testing with AT4DX's dependency injection framework. The purpose of this test is to verify that the `AccountsService` implementation correctly processes accounts while using mocking to isolate the test from database dependencies.  Let's break down what's happening:
+
+1. **Mocking Dependencies**: 
+   ```java
+   IAccountsSelector mockSelector = (IAccountsSelector)
+       Application.Selector.setMock(Accounts.SObjectType, new MockAccountsSelector());
+   ```
+   This line creates a mock implementation of the `IAccountsSelector` interface and registers it with the AT4DX dependency injection framework. This means any code that requests an `IAccountsSelector` for Account records will receive this mock instead of the real implementation.
+
+2. **Test Execution**:
+   ```java
+   IAccountsService service = (IAccountsService)Application.Service.newInstance(IAccountsService.class);
+   service.processAccounts(new Set<Id>{fflib_IDGenerator.generate(Account.SObjectType)});
+   ```
+   The test gets an instance of `IAccountsService` through the DI framework and calls its `processAccounts` method with a synthetic Account ID. The implementation is expected to query for Account records using the selector.
+
+3. **Verification**:
+   ```java
+   System.assertEquals(1, mockSelector.selectById().size());
+   ```
+   This assertion verifies that the service called the selector's `selectById` method, which is a key expectation of the test. The mock implementation returns a test Account record.
+
+4. **Mock Implementation**:
+   The inner class `MockAccountsSelector` provides a controlled implementation that doesn't touch the database but returns predictable test data.
+
+The key benefits demonstrated by this test approach:
+
+- **Isolation**: It tests the service logic in isolation from the database and other dependencies
+- **Speed**: Without database operations, the test runs quickly
+- **Predictability**: Using mocks ensures consistent test behavior
+- **Verification**: It can verify that the service interacts correctly with its dependencies
+
+This approach is particularly valuable in AT4DX's modular architecture, as it allows testing components without requiring their actual dependencies to be present, which is essential when working across package boundaries.
+
+`AccountsService.processAccounts(AccountIDs)` likely does the following:
+1. Takes a set of Account IDs
+2. Uses the selector to query for those Accounts
+3. Performs some processing on them (which isn't being verified in this specific test)
+
+The test is focused on verifying the interactions between components rather than the end-to-end behavior, which is characteristic of proper unit testing.
 
 ### For DevOps Engineers
 Configure CI/CD to run tests from each package and test cross-package integration. Use test data supplementation to reduce test maintenance:
